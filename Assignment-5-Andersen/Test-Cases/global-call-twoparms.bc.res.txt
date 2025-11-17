@@ -1,0 +1,45 @@
+0 points to: {}
+3 points to: {5, 11, }
+4 points to: {}
+5 points to: {}
+6 points to: {4, }
+7 points to: {}
+8 points to: {7, }
+12 points to: {9, }
+14 points to: {13, }
+18 points to: {}
+19 points to: {18, }
+20 points to: {}
+21 points to: {20, }
+26 points to: {}
+28 points to: {}
+32 points to: {31, }
+38 points to: {37, }
+42 points to: {}
+43 points to: {42, }
+44 points to: {}
+45 points to: {44, }
+50 points to: {}
+52 points to: {}
+56 points to: {55, }
+58 points to: {}
+62 points to: {61, }
+64 points to: {}
+68 points to: {67, }
+72 points to: {}
+73 points to: {72, }
+74 points to: {}
+75 points to: {74, }
+80 points to: {}
+87 points to: {86, }
+90 points to: {89, }
+92 points to: {91, }
+93 points to: {}
+94 points to: {93, }
+95 points to: {}
+96 points to: {95, }
+104 points to: {}
+105 points to: {}
+107 points to: {}
+109 points to: {}
+113 points to: {112, }
