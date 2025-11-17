@@ -19,6 +19,7 @@ int main(int argc, char** argv)
     SVF::SVFIRBuilder builder;
     auto pag = builder.build();
     auto consg = new SVF::ConstraintGraph(pag);
+    consg->dump();
     (void)consg;
 
     Andersen andersen(consg);
