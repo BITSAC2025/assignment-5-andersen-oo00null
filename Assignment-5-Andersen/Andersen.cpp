@@ -19,7 +19,7 @@ int main(int argc, char** argv)
     SVF::SVFIRBuilder builder;
     auto pag = builder.build();
     auto consg = new SVF::ConstraintGraph(pag);
-    (void)consg;
+    consg->dump();
 
     Andersen andersen(consg);
 
@@ -32,136 +32,113 @@ int main(int argc, char** argv)
 }
 
 
-/ Implementation of the Andersen's Inclusion-based Pointer Analysis
 void Andersen::runPointerAnalysis()
 {
-    auto pag = SVF::PAG::getPAG();
+    // Worklist to hold nodes that need processing
+    WorkList<SVF::NodeID> worklist;
 
-    // ===========================================================
-    // Phase 1: Addr (y = &x) - Initial Constraints
-    // Rule: {x} subset of pts(y)
-    // ===========================================================
-    for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Addr))
+    // 1. Initialize (Address Rule)
+    // Iterate over all nodes in the constraint graph to find Address edges.
+    // Rule: o -Address-> p  =>  pts(p) = {o}
+    for (auto const& nodeIt : *consg)
     {
-        unsigned address = edge->getSrcID(); // x (Address node ID/Allocation site)
-        unsigned pointer = edge->getDstID(); // y (Pointer variable ID)
-        
-        // Add x to y's points-to set: pts[y] <- pts[y] U {x}
-        pts[pointer].insert(address); 
+        SVF::ConstraintNode* node = nodeIt.second;
+        // In SVF, an Addr edge goes from the Object (src) to the Pointer (dst).
+        for (SVF::ConstraintEdge* edge : node->getDirectOutEdges())
+        {
+            if (edge->isAddr())
+            {
+                SVF::NodeID p = edge->getDstID(); // The pointer
+                SVF::NodeID o = edge->getSrcID(); // The object address
+                
+                // Add o to pts(p) and push p to worklist if changed
+                if (pts[p].insert(o).second)
+                {
+                    worklist.push(p);
+                }
+            }
+        }
     }
 
-    // ===========================================================
-    // Phase 2: Fixed-point Iteration (Iteratively Propagate Constraints)
-    // ===========================================================
-    bool changed = true;
-    while (changed)
+    // 2. Solver Loop
+    while (!worklist.empty())
     {
-        changed = false;
+        SVF::NodeID p = worklist.pop();
+        SVF::ConstraintNode* node = consg->getConstraintNode(p);
 
-        // --- Group 1: Simple Subset Propagation (pts(src) subset of pts(dst)) ---
-        // Applies to: Copy (y=x), Gep (y=&x->f), Call (param passing), Ret (return value), 
-        //             ThreadFork, ThreadJoin.
-        
-        // 定义所有遵循简单子集规则的边类型
-        const std::vector<SVF::PAGEdge::PAGEdgeType> simpleSubsetTypes = {
-            SVF::PAGEdge::Copy,
-            SVF::PAGEdge::Gep,
-            SVF::PAGEdge::Call,
-            SVF::PAGEdge::Ret,
-            SVF::PAGEdge::ThreadFork,
-            SVF::PAGEdge::ThreadJoin
-        };
-        
-        for (SVF::PAGEdge::PAGEdgeType type : simpleSubsetTypes)
+        // Optimization: Get the points-to set reference
+        const auto& p_pts = pts[p];
+
+        // --- Store and Load Rules (depend on o in pts(p)) ---
+        for (SVF::NodeID o : p_pts)
         {
-            for (SVF::PAGEdge *edge : pag->getSVFStmtSet(type))
+            // Store Rule: q -Store-> p  =>  q -Copy-> o
+            // In SVF, Store edge direction is Value(q) -> Pointer(p)
+            for (SVF::ConstraintEdge* edge : node->getDirectInEdges())
             {
-                unsigned src = edge->getSrcID();
-                unsigned dst = edge->getDstID();
-                
-                // pts[dst] <- pts[dst] U pts[src]
-                for (auto p : pts[src])
+                if (edge->isStore())
                 {
-                    if (pts[dst].insert(p).second)
-                        changed = true;
+                    SVF::NodeID q = edge->getSrcID();
+                    // Add Copy edge: q -> o
+                    // addConstraintEdge returns true if the edge did not exist and was added
+                    if (consg->addConstraintEdge(q, o, SVF::ConstraintEdge::Copy))
+                    {
+                        worklist.push(q); // Push q to propagate its points-to set along the new edge
+                    }
                 }
             }
-        }
-        
-        // --- Group 2: Control Flow Constraints (Phi/Select) ---
-        // These are conceptually similar to Copy but require iterating over operands.
 
-        // Phi (y = phi(x1, x2, ...)): operand -> result
-        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Phi))
-        {
-            const SVF::PhiStmt *phi = SVF::SVFUtil::cast<SVF::PhiStmt>(edge);
-            unsigned res = phi->getResID(); 
-            for (const auto opVar : phi->getOpndVars()) 
+            // Load Rule: p -Load-> r  =>  o -Copy-> r
+            // In SVF, Load edge direction is Pointer(p) -> Value(r)
+            for (SVF::ConstraintEdge* edge : node->getDirectOutEdges())
             {
-                unsigned op = opVar->getId();
-                // pts[res] <- pts[res] U pts[op]
-                for (auto p : pts[op])
+                if (edge->isLoad())
                 {
-                    if (pts[res].insert(p).second)
-                        changed = true;
-                }
-            }
-        }
-        
-        // Select (y = select(cond, x1, x2)): operand -> result
-        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Select))
-        {
-            const SVF::SelectStmt *sel = SVF::SVFUtil::cast<SVF::SelectStmt>(edge);
-            unsigned res = sel->getResID(); 
-            for (const auto opVar : sel->getOpndVars()) 
-            {
-                unsigned op = opVar->getId();
-                // pts[res] <- pts[res] U pts[op]
-                for (auto p : pts[op])
-                {
-                    if (pts[res].insert(p).second)
-                        changed = true;
+                    SVF::NodeID r = edge->getDstID();
+                    // Add Copy edge: o -> r
+                    if (consg->addConstraintEdge(o, r, SVF::ConstraintEdge::Copy))
+                    {
+                        worklist.push(o); // Push o to propagate its points-to set along the new edge
+                    }
                 }
             }
         }
 
-
-        // --- Group 3: Indirect Memory Access Rules (The Core Propagation) ---
-
-        // Load (y = *x)
-        // Rule: If a in pts(x), then pts(a) subset of pts(y)
-        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Load))
+        // --- Copy and GEP Rules (outgoing edges from p) ---
+        for (SVF::ConstraintEdge* edge : node->getDirectOutEdges())
         {
-            unsigned x = edge->getSrcID(); // x: pointer (operand)
-            unsigned y = edge->getDstID(); // y: variable receiving the value (*x)
-
-            for (auto a : pts[x]) // 'a' is an address node ID (target of x)
+            // Copy Rule: p -Copy-> x  =>  pts(x) U= pts(p)
+            if (edge->isCopy())
             {
-                // Propagate the points-to set of the memory location 'a' to the variable 'y'
-                for (auto v : pts[a]) // 'v' is an address pointed to by 'a'
+                SVF::NodeID x = edge->getDstID();
+                bool changed = false;
+                for (SVF::NodeID o : p_pts)
                 {
-                    if (pts[y].insert(v).second) 
+                    if (pts[x].insert(o).second)
                         changed = true;
+                }
+                if (changed)
+                    worklist.push(x);
+            }
+            // Gep Rule: p -Gep-> x  =>  pts(x) U= { o + offset | o in pts(p) }
+            else if (edge->isGep())
+            {
+                SVF::NodeID x = edge->getDstID();
+                // Dynamically cast to GepCGEdge to access the offset/field index
+                if (auto gepEdge = llvm::dyn_cast<SVF::GepCGEdge>(edge))
+                {
+                    u32_t offset = gepEdge->getConstantFieldIdx();
+                    bool changed = false;
+                    for (SVF::NodeID o : p_pts)
+                    {
+                        // In SVF PAG, field nodes are typically indexed relative to the base object
+                        if (pts[x].insert(o + offset).second)
+                            changed = true;
+                    }
+                    if (changed)
+                        worklist.push(x);
                 }
             }
         }
-
-        // Store (*x = y)
-        // Rule: If a in pts(x), then pts(y) subset of pts(a)
-        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Store))
-        {
-            unsigned y = edge->getSrcID(); // y: value (operand)
-            unsigned x = edge->getDstID(); // x: pointer to memory location (operand)
-
-            for (auto a : pts[x]) // 'a' is an address node ID (target of x)
-            {
-                // Propagate the points-to set of 'y' to the memory location 'a'
-                for (auto v : pts[y]) // 'v' is an address pointed to by 'y'
-                {
-                    if (pts[a].insert(v).second) 
-                        changed = true;
-                }
-            }
-        }
-    } // End while (changed)
+    }
 }
