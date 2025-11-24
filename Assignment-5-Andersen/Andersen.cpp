@@ -46,8 +46,6 @@ void Andersen::runPointerAnalysis()
     {
         // Addr edge: SrcID (x, the address) -> DstID (y, the pointer)
         // SrcID is the address node (Addr node), DstID is the pointer variable.
-        // PAG::getPAG()->getIDWithLLVMInst() can map LLVM values to node IDs,
-        // but here we just use the IDs from the edge.
         unsigned address = edge->getSrcID(); // x (the memory location)
         unsigned pointer = edge->getDstID(); // y (the variable holding the address)
         
@@ -65,7 +63,7 @@ void Andersen::runPointerAnalysis()
 
         // --- Basic Propagation Rules (Subset Constraints: pts[src] subset of pts[dst]) ---
 
-        // Phi: res = Phi(op1, op2, ...)
+        // Phi: res = Phi(op1, op2, ...) (Flow through control flow join points)
         // Constraint: pts(op_i) subset of pts(res)
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Phi))
         {
@@ -82,7 +80,7 @@ void Andersen::runPointerAnalysis()
             }
         }
         
-        // Select: res = Select(cond, op1, op2)
+        // Select: res = Select(cond, op1, op2) (Flow through conditional expressions)
         // Constraint: pts(op_i) subset of pts(res) (Similar to Phi)
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Select))
         {
@@ -112,8 +110,35 @@ void Andersen::runPointerAnalysis()
             }
         }
 
-        // Call (Argument Passing) and Ret (Return Value Passing) are also Copy-like constraints
-        // Call: DstID is the formal parameter/return value, SrcID is the actual argument/returned value.
+        // Cast: y = (Type)x (Type casting of a pointer)
+        // This is necessary because LLVM IR uses bitcasts for pointer type changes.
+        // Constraint: pts(src) subset of pts(dst)
+        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Cast))
+        {
+            unsigned src = edge->getSrcID();
+            unsigned dst = edge->getDstID();
+            for (auto p : pts[src])
+            {
+                if (pts[dst].insert(p).second)
+                    changed = true;
+            }
+        }
+
+        // Gep: y = GetElementPtr(x, ...) (Address calculation in arrays/structs)
+        // Constraint (Field-Insensitive Andersen): pts(src) subset of pts(dst)
+        // SrcID is the base pointer (x), DstID is the resulting pointer (y).
+        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Gep))
+        {
+            unsigned src = edge->getSrcID();
+            unsigned dst = edge->getDstID();
+            for (auto p : pts[src])
+            {
+                if (pts[dst].insert(p).second)
+                    changed = true;
+            }
+        }
+        
+        // Call: Parameter passing (actual -> formal)
         // Constraint: pts(actual) subset of pts(formal)
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Call))
         {
@@ -126,7 +151,7 @@ void Andersen::runPointerAnalysis()
             }
         }
         
-        // Ret: DstID is the receiver of return value, SrcID is the return value.
+        // Ret: Return value passing (return\_value -> receiver)
         // Constraint: pts(return\_value) subset of pts(receiver)
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Ret))
         {
@@ -139,7 +164,7 @@ void Andersen::runPointerAnalysis()
             }
         }
         
-        // ThreadFork/ThreadJoin: Similar to Copy for cross-thread data flow
+        // ThreadFork/ThreadJoin: Cross-thread data flow
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::ThreadFork))
         {
             unsigned src = edge->getSrcID();
@@ -158,8 +183,8 @@ void Andersen::runPointerAnalysis()
             {
                 if (pts[dst].insert(p).second)
                     changed = true;
+                }
             }
-        }
 
         // --- Indirect Memory Access Rules (The Core of Andersen Analysis) ---
 
@@ -203,4 +228,4 @@ void Andersen::runPointerAnalysis()
             }
         }
     } // End while (changed)
-}
+} 
