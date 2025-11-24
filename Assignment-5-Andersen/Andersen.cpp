@@ -32,6 +32,7 @@ int main(int argc, char** argv)
 }
 
 
+// Implementation of the Andersen's Inclusion-based Pointer Analysis
 void Andersen::runPointerAnalysis()
 {
     auto pag = SVF::PAG::getPAG();
@@ -39,17 +40,19 @@ void Andersen::runPointerAnalysis()
     // -----------------------------------------------------------
     // Phase 1: Initialize Points-to Sets (Initial Constraints)
     // -----------------------------------------------------------
-    // Handle Addr: y = &x
+    
+    // Principle: Handle the Address-of (&) Operator (y = &x).
+    // This is the fundamental source of all address information. The pointer 'y' 
+    // receives the *address* of memory location 'x'. This creates a hard constraint.
     // Constraint: {x} subset of pts(y)
-    // Propagation: pts[y] <- pts[y] U {x}
+    // Implementation: Directly insert the address node ID (x) into the points-to set of the pointer variable node ID (y).
     for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Addr))
     {
-        // Addr edge: SrcID (x, the address) -> DstID (y, the pointer)
-        // SrcID is the address node (Addr node), DstID is the pointer variable.
-        unsigned address = edge->getSrcID(); // x (the memory location)
-        unsigned pointer = edge->getDstID(); // y (the variable holding the address)
+        // Addr edge: SrcID is the Address node (x), DstID is the Pointer variable (y).
+        unsigned address = edge->getSrcID(); // x (memory location/allocation site)
+        unsigned pointer = edge->getDstID(); // y (pointer variable)
         
-        // pts[pointer] <- pts[pointer] U {address}
+        // pts[y] <- pts[y] U {x}
         pts[pointer].insert(address); 
     }
 
@@ -61,44 +64,13 @@ void Andersen::runPointerAnalysis()
     {
         changed = false;
 
-        // --- Basic Propagation Rules (Subset Constraints: pts[src] subset of pts[dst]) ---
-
-        // Phi: res = Phi(op1, op2, ...) (Flow through control flow join points)
-        // Constraint: pts(op_i) subset of pts(res)
-        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Phi))
-        {
-            const SVF::PhiStmt *phi = SVF::SVFUtil::cast<SVF::PhiStmt>(edge);
-            unsigned res = phi->getResID(); // Result (dst)
-            for (const auto opVar : phi->getOpndVars()) // All operands (src)
-            {
-                unsigned op = opVar->getId();
-                for (auto p : pts[op])
-                {
-                    if (pts[res].insert(p).second)
-                        changed = true;
-                }
-            }
-        }
+        // --- Group 1: Simple Subset Constraints (Strong Copies: pts[src] subset of pts[dst]) ---
+        // Principle: If pointer y gets its value directly from pointer x, then y must
+        // point to everything x points to. This applies to simple assignments,
+        // control flow merges, type casts, address arithmetic, and parameter passing.
         
-        // Select: res = Select(cond, op1, op2) (Flow through conditional expressions)
-        // Constraint: pts(op_i) subset of pts(res) (Similar to Phi)
-        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Select))
-        {
-            const SVF::SelectStmt *sel = SVF::SVFUtil::cast<SVF::SelectStmt>(edge);
-            unsigned res = sel->getResID(); // Result (dst)
-            for (const auto opVar : sel->getOpndVars()) // All operands (src)
-            {
-                unsigned op = opVar->getId();
-                for (auto p : pts[op])
-                {
-                    if (pts[res].insert(p).second)
-                        changed = true;
-                }
-            }
-        }
         
-        // Copy: y = x (Simple assignment)
-        // Constraint: pts(src) subset of pts(dst)
+        // 1. Copy: y = x (Simple Assignment)
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Copy))
         {
             unsigned src = edge->getSrcID();
@@ -110,9 +82,9 @@ void Andersen::runPointerAnalysis()
             }
         }
 
-        // Cast: y = (Type)x (Type casting of a pointer)
-        // This is necessary because LLVM IR uses bitcasts for pointer type changes.
-        // Constraint: pts(src) subset of pts(dst)
+        // 2. Cast: y = (Type)x (Pointer Type Casting)
+        // Principle: LLVM uses bitcast for changing pointer types; these operations do not 
+        // change the actual address value, so it's a simple subset propagation.
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Cast))
         {
             unsigned src = edge->getSrcID();
@@ -123,10 +95,10 @@ void Andersen::runPointerAnalysis()
                     changed = true;
             }
         }
-
-        // Gep: y = GetElementPtr(x, ...) (Address calculation in arrays/structs)
-        // Constraint (Field-Insensitive Andersen): pts(src) subset of pts(dst)
-        // SrcID is the base pointer (x), DstID is the resulting pointer (y).
+        
+        // 3. Gep: y = GetElementPtr(x, ...) (Address of Array/Struct Element)
+        // Principle: In Field-Insensitive Andersen, address arithmetic (Gep) results in simple 
+        // subset propagation, as we ignore the specific field/offset.
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Gep))
         {
             unsigned src = edge->getSrcID();
@@ -137,9 +109,24 @@ void Andersen::runPointerAnalysis()
                     changed = true;
             }
         }
-        
-        // Call: Parameter passing (actual -> formal)
-        // Constraint: pts(actual) subset of pts(formal)
+
+        // 4. CopyAddr: This handles a specific type of address value copying in the PAG structure, 
+        // often used for address registers or special internal copies.
+        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::CopyAddr))
+        {
+            unsigned src = edge->getSrcID();
+            unsigned dst = edge->getDstID();
+            for (auto p : pts[src])
+            {
+                if (pts[dst].insert(p).second)
+                    changed = true;
+            }
+        }
+
+        // 5. Interprocedural Flow (Call/Ret)
+        // Principle: Parameter passing (Call) and return value handling (Ret) are forms 
+        // of simple value flow, leading to subset constraints.
+        // Call: actual parameter (src) -> formal parameter (dst)
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Call))
         {
             unsigned src = edge->getSrcID();
@@ -150,9 +137,7 @@ void Andersen::runPointerAnalysis()
                     changed = true;
             }
         }
-        
-        // Ret: Return value passing (return\_value -> receiver)
-        // Constraint: pts(return\_value) subset of pts(receiver)
+        // Ret: return value (src) -> result variable (dst)
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Ret))
         {
             unsigned src = edge->getSrcID();
@@ -164,7 +149,43 @@ void Andersen::runPointerAnalysis()
             }
         }
         
-        // ThreadFork/ThreadJoin: Cross-thread data flow
+        // 6. Control Flow (Phi/Select)
+        // Principle: At control flow join points (Phi) or conditional assignments (Select), 
+        // the result pointer must point to the union of all possible input pointers.
+        // Phi: operand (src) -> result (dst) at control flow join points.
+        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Phi))
+        {
+            const SVF::PhiStmt *phi = SVF::SVFUtil::cast<SVF::PhiStmt>(edge);
+            unsigned res = phi->getResID(); 
+            for (const auto opVar : phi->getOpndVars()) 
+            {
+                unsigned op = opVar->getId();
+                for (auto p : pts[op])
+                {
+                    if (pts[res].insert(p).second)
+                        changed = true;
+                }
+            }
+        }
+        // Select: operand (src) -> result (dst) at conditional merge.
+        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Select))
+        {
+            const SVF::SelectStmt *sel = SVF::SVFUtil::cast<SVF::SelectStmt>(edge);
+            unsigned res = sel->getResID(); 
+            for (const auto opVar : sel->getOpndVars()) 
+            {
+                unsigned op = opVar->getId();
+                for (auto p : pts[op])
+                {
+                    if (pts[res].insert(p).second)
+                        changed = true;
+                }
+            }
+        }
+
+        // 7. Threading (ThreadFork/Join)
+        // Principle: Flow of pointers between threads (e.g., passing variables to a new thread)
+        // also represents a simple subset constraint.
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::ThreadFork))
         {
             unsigned src = edge->getSrcID();
@@ -186,21 +207,21 @@ void Andersen::runPointerAnalysis()
                 }
             }
 
-        // --- Indirect Memory Access Rules (The Core of Andersen Analysis) ---
 
-        // Load: y = *x
-        // Constraint: If a in pts(x), then pts(a) subset of pts(y)
-        // Load edge: SrcID is the pointer x, DstID is the result y.
+        // --- Group 2: Indirect Memory Access Rules (The Core Propagation) ---
+
+        // 8. Load: y = *x
+        // Principle: The value stored at the memory locations pointed to by 'x' flows into 'y'.
+        // Constraint: If a in pts(x), then pts(a) subset of pts(y).
+        // Implementation: Iterate over pts(x). For each address 'a', propagate pts(a) to pts(y).
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Load))
         {
             unsigned x = edge->getSrcID(); // x: pointer (operand)
             unsigned y = edge->getDstID(); // y: variable receiving the value (*x)
 
-            // For every address 'a' that 'x' points to:
-            for (auto a : pts[x]) 
+            for (auto a : pts[x]) // 'a' is an address node ID
             {
-                // Propagate contents of pts[a] to pts[y]
-                for (auto v : pts[a])
+                for (auto v : pts[a]) // 'v' is an address pointed to by 'a'
                 {
                     if (pts[y].insert(v).second) 
                         changed = true;
@@ -208,19 +229,18 @@ void Andersen::runPointerAnalysis()
             }
         }
 
-        // Store: *x = y
-        // Constraint: If a in pts(x), then pts(y) subset of pts(a)
-        // Store edge: SrcID is the value y, DstID is the pointer x.
+        // 9. Store: *x = y
+        // Principle: The value of 'y' flows into the memory locations pointed to by 'x'.
+        // Constraint: If a in pts(x), then pts(y) subset of pts(a).
+        // Implementation: Iterate over pts(x). For each address 'a', propagate pts(y) to pts(a).
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Store))
         {
             unsigned y = edge->getSrcID(); // y: value (operand)
             unsigned x = edge->getDstID(); // x: pointer to memory location (operand)
 
-            // For every address 'a' that 'x' points to:
-            for (auto a : pts[x]) 
+            for (auto a : pts[x]) // 'a' is an address node ID
             {
-                // Propagate contents of pts[y] to pts[a]
-                for (auto v : pts[y]) 
+                for (auto v : pts[y]) // 'v' is an address pointed to by 'y'
                 {
                     if (pts[a].insert(v).second) 
                         changed = true;
@@ -228,4 +248,4 @@ void Andersen::runPointerAnalysis()
             }
         }
     } // End while (changed)
-} 
+}
