@@ -70,7 +70,11 @@ void Andersen::runPointerAnalysis()
         // control flow merges, type casts, address arithmetic, and parameter passing.
         
         
-        // 1. Copy: y = x (Simple Assignment)
+        // 1. Copy (and implicitly Cast/CopyAddr): y = x or y = (Type)x
+        // Note: The problematic 'Cast' and 'CopyAddr' edge types are typically 
+        // covered by the generic 'Copy' edge in simplified SVF PAG generation for 
+        // field-insensitive analysis. We rely on 'Copy' to handle these simple 
+        // pointer value movements.
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Copy))
         {
             unsigned src = edge->getSrcID();
@@ -81,22 +85,8 @@ void Andersen::runPointerAnalysis()
                     changed = true;
             }
         }
-
-        // 2. Cast: y = (Type)x (Pointer Type Casting)
-        // Principle: LLVM uses bitcast for changing pointer types; these operations do not 
-        // change the actual address value, so it's a simple subset propagation.
-        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Cast))
-        {
-            unsigned src = edge->getSrcID();
-            unsigned dst = edge->getDstID();
-            for (auto p : pts[src])
-            {
-                if (pts[dst].insert(p).second)
-                    changed = true;
-            }
-        }
         
-        // 3. Gep: y = GetElementPtr(x, ...) (Address of Array/Struct Element)
+        // 2. Gep: y = GetElementPtr(x, ...) (Address of Array/Struct Element)
         // Principle: In Field-Insensitive Andersen, address arithmetic (Gep) results in simple 
         // subset propagation, as we ignore the specific field/offset.
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Gep))
@@ -110,20 +100,7 @@ void Andersen::runPointerAnalysis()
             }
         }
 
-        // 4. CopyAddr: This handles a specific type of address value copying in the PAG structure, 
-        // often used for address registers or special internal copies.
-        for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::CopyAddr))
-        {
-            unsigned src = edge->getSrcID();
-            unsigned dst = edge->getDstID();
-            for (auto p : pts[src])
-            {
-                if (pts[dst].insert(p).second)
-                    changed = true;
-            }
-        }
-
-        // 5. Interprocedural Flow (Call/Ret)
+        // 3. Interprocedural Flow (Call/Ret)
         // Principle: Parameter passing (Call) and return value handling (Ret) are forms 
         // of simple value flow, leading to subset constraints.
         // Call: actual parameter (src) -> formal parameter (dst)
@@ -149,7 +126,7 @@ void Andersen::runPointerAnalysis()
             }
         }
         
-        // 6. Control Flow (Phi/Select)
+        // 4. Control Flow (Phi/Select)
         // Principle: At control flow join points (Phi) or conditional assignments (Select), 
         // the result pointer must point to the union of all possible input pointers.
         // Phi: operand (src) -> result (dst) at control flow join points.
@@ -183,7 +160,7 @@ void Andersen::runPointerAnalysis()
             }
         }
 
-        // 7. Threading (ThreadFork/Join)
+        // 5. Threading (ThreadFork/Join)
         // Principle: Flow of pointers between threads (e.g., passing variables to a new thread)
         // also represents a simple subset constraint.
         for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::ThreadFork))
@@ -210,7 +187,7 @@ void Andersen::runPointerAnalysis()
 
         // --- Group 2: Indirect Memory Access Rules (The Core Propagation) ---
 
-        // 8. Load: y = *x
+        // 6. Load: y = *x
         // Principle: The value stored at the memory locations pointed to by 'x' flows into 'y'.
         // Constraint: If a in pts(x), then pts(a) subset of pts(y).
         // Implementation: Iterate over pts(x). For each address 'a', propagate pts(a) to pts(y).
@@ -229,7 +206,7 @@ void Andersen::runPointerAnalysis()
             }
         }
 
-        // 9. Store: *x = y
+        // 7. Store: *x = y
         // Principle: The value of 'y' flows into the memory locations pointed to by 'x'.
         // Constraint: If a in pts(x), then pts(y) subset of pts(a).
         // Implementation: Iterate over pts(x). For each address 'a', propagate pts(y) to pts(a).
