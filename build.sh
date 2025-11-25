@@ -21,4 +21,4 @@ else
   cmake -DCMAKE_BUILD_TYPE=Debug ..
 fi
 
-make -j4
+make -j$(nproc)
