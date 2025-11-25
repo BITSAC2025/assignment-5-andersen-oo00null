@@ -110,12 +110,12 @@ void Andersen::runPointerAnalysis()
             }
 
             // ---------------------
-            // Gep Rule
+            // Gep Rule (Normal & Variant)
             // ---------------------
             // p -Gep-> x  =>  pts(x) = pts(x) U {o + offset}
             for (auto edge : pNode->getOutEdges())
             {
-                // Check for NormalGep (constant offset GEPs)
+                // Case 1: Constant Offset (NormalGep)
                 if (edge->getEdgeKind() == SVF::ConstraintEdge::NormalGep)
                 {
                     // Cast to NormalGepCGEdge to access the constant index
@@ -126,6 +126,21 @@ void Andersen::runPointerAnalysis()
                         SVF::NodeID field = o + gepEdge->getConstantFieldIdx();
                         
                         if (pts[x].insert(field).second)
+                        {
+                            worklist.push(x);
+                        }
+                    }
+                }
+                // Case 2: Variable Index (VariantGep) - NEW
+                else if (edge->getEdgeKind() == SVF::ConstraintEdge::VariantGep)
+                {
+                    if (auto gepEdge = llvm::dyn_cast<SVF::VariantGepCGEdge>(edge))
+                    {
+                        SVF::NodeID x = edge->getDstID();
+                        // For array-insensitive analysis, we treat variable index GEP 
+                        // as accessing the base object (offset 0).
+                        // p[i] is treated same as p[0].
+                        if (pts[x].insert(o).second)
                         {
                             worklist.push(x);
                         }
