@@ -83,7 +83,7 @@ void Andersen::runPointerAnalysis()
                 if (edge->getEdgeKind() == SVF::ConstraintEdge::Store)
                 {
                     SVF::NodeID q = edge->getSrcID();
-                    // Fix: Use addCopyCGEdge specific helper
+                    // Use addCopyCGEdge specific helper
                     if (consg->addCopyCGEdge(q, o))
                     {
                         worklist.push(q);
@@ -101,7 +101,7 @@ void Andersen::runPointerAnalysis()
                 if (edge->getEdgeKind() == SVF::ConstraintEdge::Load)
                 {
                     SVF::NodeID r = edge->getDstID();
-                    // Fix: Use addCopyCGEdge specific helper
+                    // Use addCopyCGEdge specific helper
                     if (consg->addCopyCGEdge(o, r))
                     {
                         worklist.push(o);
@@ -122,7 +122,7 @@ void Andersen::runPointerAnalysis()
                     if (auto gepEdge = llvm::dyn_cast<SVF::NormalGepCGEdge>(edge))
                     {
                         SVF::NodeID x = edge->getDstID();
-                        // Fix: Use getConstantFieldIdx() on the casted pointer
+                        // Use getConstantFieldIdx() on the casted pointer
                         SVF::NodeID field = o + gepEdge->getConstantFieldIdx();
                         
                         if (pts[x].insert(field).second)
@@ -131,15 +131,14 @@ void Andersen::runPointerAnalysis()
                         }
                     }
                 }
-                // Case 2: Variable Index (VariantGep) - NEW
+                // Case 2: Variable Index (VariantGep)
                 else if (edge->getEdgeKind() == SVF::ConstraintEdge::VariantGep)
                 {
                     if (auto gepEdge = llvm::dyn_cast<SVF::VariantGepCGEdge>(edge))
                     {
                         SVF::NodeID x = edge->getDstID();
-                        // For array-insensitive analysis, we treat variable index GEP 
-                        // as accessing the base object (offset 0).
-                        // p[i] is treated same as p[0].
+                        // For VariantGep (p[i]), we conservatively assume it points to 
+                        // the base object 'o' (array flattening).
                         if (pts[x].insert(o).second)
                         {
                             worklist.push(x);

@@ -1,11 +1,11 @@
 4 points to: {5, }
 7 points to: {8, }
 10 points to: {11, }
+11 points to: {13, 15, }
 12 points to: {13, }
 14 points to: {15, }
-21 points to: {36, }
-23 points to: {36, }
-25 points to: {36, }
-27 points to: {36, }
+21 points to: {11, }
+23 points to: {11, }
+25 points to: {11, }
+27 points to: {11, }
 30 points to: {31, }
-36 points to: {13, 15, }
