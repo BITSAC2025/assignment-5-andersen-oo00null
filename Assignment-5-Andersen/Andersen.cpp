@@ -34,116 +34,108 @@ int main(int argc, char** argv)
 
 void Andersen::runPointerAnalysis()
 {
-    // Worklist to hold nodes that need processing
     WorkList<SVF::NodeID> worklist;
 
     // -------------------------------------------------------
-    // 1. Initialize WorkList (Address Rule)
+    // 1. Initialize WorkList (Processing Address Edges)
     // -------------------------------------------------------
     // Rule: o -Address-> p  =>  pts(p) = pts(p) U {o}
-    for (auto it = consg->begin(); it != consg->end(); ++it)
+    for (auto const& iter : *consg)
     {
-        SVF::ConstraintNode* node = it->second;
+        SVF::ConstraintNode* node = iter.second;
         for (auto edge : node->getOutEdges())
         {
+            // Fix: Check directly to avoid type mismatch error
             if (edge->getEdgeKind() == SVF::ConstraintEdge::Addr)
             {
                 SVF::NodeID o = edge->getSrcID();
                 SVF::NodeID p = edge->getDstID();
                 if (pts[p].insert(o).second)
+                {
                     worklist.push(p);
+                }
             }
         }
     }
 
     // -------------------------------------------------------
-    // 2. Main Worklist Loop
+    // 2. Main Solver Loop
     // -------------------------------------------------------
     while (!worklist.empty())
     {
         SVF::NodeID p = worklist.pop();
         SVF::ConstraintNode* pNode = consg->getConstraintNode(p);
+        auto& pts_p = pts[p];
 
-        // Iterate over all objects 'o' that 'p' points to
-        for (SVF::NodeID o : pts[p])
+        // ---------------------
+        // Handle Store Edges (Incoming)
+        // ---------------------
+        // q -Store-> p  =>  q -Copy-> o
+        for (auto edge : pNode->getInEdges())
         {
-            // ---------------------
-            // Store Rule
-            // ---------------------
-            // q -Store-> p  =>  q -Copy-> o
-            for (auto edge : pNode->getInEdges())
+            if (edge->getEdgeKind() == SVF::ConstraintEdge::Store)
             {
-                if (edge->getEdgeKind() == SVF::ConstraintEdge::Store)
+                SVF::NodeID q = edge->getSrcID();
+                for (SVF::NodeID o : pts_p)
                 {
-                    SVF::NodeID q = edge->getSrcID();
                     if (consg->addCopyCGEdge(q, o))
                         worklist.push(q);
-                }
-            }
-
-            // ---------------------
-            // Load Rule
-            // ---------------------
-            // p -Load-> r  =>  o -Copy-> r
-            for (auto edge : pNode->getOutEdges())
-            {
-                if (edge->getEdgeKind() == SVF::ConstraintEdge::Load)
-                {
-                    SVF::NodeID r = edge->getDstID();
-                    if (consg->addCopyCGEdge(o, r))
-                        worklist.push(o);
-                }
-            }
-
-            // ---------------------
-            // Gep Rule
-            // ---------------------
-            // p -Gep-> x
-            for (auto edge : pNode->getOutEdges())
-            {
-                // Case 1: Constant Offset (NormalGep)
-                // pts(x) = pts(x) U {o + offset}
-                if (edge->getEdgeKind() == SVF::ConstraintEdge::NormalGep)
-                {
-                    if (auto gepEdge = llvm::dyn_cast<SVF::NormalGepCGEdge>(edge))
-                    {
-                        SVF::NodeID x = edge->getDstID();
-                        SVF::NodeID field = o + gepEdge->getConstantFieldIdx();
-                        if (pts[x].insert(field).second)
-                            worklist.push(x);
-                    }
-                }
-                // Case 2: Variable Index (VariantGep)
-                // pts(x) = pts(x) U {o}  (Array insensitive: points to base)
-                else if (edge->getEdgeKind() == SVF::ConstraintEdge::VariantGep)
-                {
-                    if (auto gepEdge = llvm::dyn_cast<SVF::VariantGepCGEdge>(edge))
-                    {
-                        SVF::NodeID x = edge->getDstID();
-                        if (pts[x].insert(o).second)
-                            worklist.push(x);
-                    }
                 }
             }
         }
 
         // ---------------------
-        // Copy Rule
+        // Handle Outgoing Edges (Copy, Load, Gep)
         // ---------------------
-        // p -Copy-> x  =>  pts(x) = pts(x) U pts(p)
         for (auto edge : pNode->getOutEdges())
         {
-            if (edge->getEdgeKind() == SVF::ConstraintEdge::Copy)
+            // Fix: Use 'auto' to let compiler deduce 'long long int' type safely
+            auto edgeKind = edge->getEdgeKind();
+
+            // Copy Rule: p -Copy-> x
+            if (edgeKind == SVF::ConstraintEdge::Copy)
             {
                 SVF::NodeID x = edge->getDstID();
-                bool changed = false;
-                for (SVF::NodeID o : pts[p])
-                {
-                    if (pts[x].insert(o).second)
-                        changed = true;
-                }
-                if (changed)
+                auto& pts_x = pts[x];
+                
+                size_t oldSize = pts_x.size();
+                pts_x.insert(pts_p.begin(), pts_p.end());
+
+                if (pts_x.size() != oldSize)
                     worklist.push(x);
+            }
+            // Load Rule: p -Load-> r
+            else if (edgeKind == SVF::ConstraintEdge::Load)
+            {
+                SVF::NodeID r = edge->getDstID();
+                for (SVF::NodeID o : pts_p)
+                {
+                    if (consg->addCopyCGEdge(o, r))
+                        worklist.push(o);
+                }
+            }
+            // Gep Rule: p -Gep-> x
+            else if (edgeKind == SVF::ConstraintEdge::NormalGep || 
+                     edgeKind == SVF::ConstraintEdge::VariantGep)
+            {
+                // Dyn_cast works because NormalGepCGEdge and VariantGepCGEdge 
+                // both inherit from GepCGEdge
+                if (auto gepEdge = llvm::dyn_cast<SVF::GepCGEdge>(edge))
+                {
+                    SVF::NodeID x = edge->getDstID();
+                    auto& pts_x = pts[x];
+                    size_t oldSize = pts_x.size();
+
+                    for (SVF::NodeID o : pts_p)
+                    {
+                        // Helper handles both constant offsets and variable indices
+                        SVF::NodeID fieldObj = consg->getGepObjVar(o, gepEdge);
+                        pts_x.insert(fieldObj);
+                    }
+
+                    if (pts_x.size() != oldSize)
+                        worklist.push(x);
+                }
             }
         }
     }
